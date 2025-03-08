@@ -1,0 +1,326 @@
+// ID de las carpetas principales (deberás reemplazar los ID de las carpetas con los tuyos)
+const CARPETAS = {
+  'Repertorio Sacro': 'ID-Repertorio Sacro',
+  'Repertorio Popular': 'ID-Repertorio Popular',
+  'Repertorio de Navidad': 'ID-Repertorio de Navidad',
+  'Repertorio Clásico': 'ID-Repertorio Clásico'
+};
+
+// ID del formulario
+const FORM_ID = 'ID-Formulario'; // Reemplaza este ID con el del formulario que usarás
+// ID de la hoja de cálculo para almacenar los datos
+const SPREADSHEET_ID = 'ID-Hoja de cálculo'; // Reemplaza este ID con el de la hoja de cálculo que usarás
+
+//Función para determinar que está enviando el formulario
+function onFormSubmit(e) {
+  const respuestas = e.response.getItemResponses();
+  const tipoSubmision = respuestas[0].getResponse(); // Aquí se determina si es una partitura o un tutorial.
+  
+  if (tipoSubmision === 'Partitura') {
+    procesarPartitura(respuestas);
+  } else {
+    procesarTutorial(respuestas);
+  }
+}
+
+// Función para guardar los datos de las partituras y guardarla en la carpeta que le corresponde
+function procesarPartitura(respuestas) {
+  // Obtener datos del formulario
+  const carpetaSeleccionada = respuestas[1].getResponse();
+  const nombreObra = respuestas[2].getResponse();
+  const autor = respuestas[3].getResponse();
+  const arreglista = respuestas[4].getResponse();
+  const archivoPartitura = respuestas[5].getResponse();
+  const tieneTutoriales = respuestas[6].getResponse();
+  const archivosTutoriales = tieneTutoriales === 'Sí' ? respuestas[7].getResponse() : null;
+  
+  // Crear subcarpeta para la obra
+  const carpetaPrincipal = DriveApp.getFolderById(CARPETAS[carpetaSeleccionada]);
+  const subcarpeta = carpetaPrincipal.createFolder(nombreObra);
+  
+  // Mover archivo de partitura y restaurar nombre original
+  moverArchivoYRestaurarNombre(archivoPartitura, subcarpeta);
+  
+  // Si hay tutoriales, moverlos también y restaurar nombres originales
+  if (archivosTutoriales) {
+    archivosTutoriales.forEach(archivo => moverArchivoYRestaurarNombre(archivo, subcarpeta));
+  }
+  
+  // Registrar en la hoja de cálculo
+  registrarObra({
+    nombre: nombreObra,
+    autor: autor,
+    arreglista: arreglista,
+    carpeta: carpetaSeleccionada,
+    tieneTutoriales: tieneTutoriales === 'Sí',
+    rutaCarpeta: subcarpeta.getId()
+  });
+}
+
+//Función para guardar los tutoriales en la carpeta que le corresponde
+function procesarTutorial(respuestas) {
+  const nombreObra = respuestas[1].getResponse();
+  const archivosTutoriales = respuestas[2].getResponse();
+  
+  // Buscar la carpeta de la obra
+  const rutaCarpeta = buscarRutaCarpeta(nombreObra);
+  if (!rutaCarpeta) {
+    throw new Error('No se encontró la carpeta para la obra especificada');
+  }
+  
+  const carpetaObra = DriveApp.getFolderById(rutaCarpeta);
+  
+  // Mover archivos de tutoriales y restaurar nombres originales
+  archivosTutoriales.forEach(fileId => {
+    try {
+      moverArchivoYRestaurarNombre(fileId, carpetaObra);
+    } catch (error) {
+      Logger.log('Error al mover archivo: ' + error.toString());
+    }
+  });
+  
+  // Actualizar estado de tutoriales en la hoja de cálculo
+  actualizarEstadoTutoriales(nombreObra);
+}
+
+//Función para guardar el nombre del archivo y moverlo a la carpeta que le corresponde
+function moverArchivoYRestaurarNombre(fileId, carpetaDestino) {
+  const file = DriveApp.getFileById(fileId);
+  const nombreOriginal = limpiarNombreArchivo(file.getName());
+  
+  // Copiar todas las carpetas padre a un array antes de modificarlas
+  const carpetasPadre = [];
+  const padres = file.getParents();
+  while (padres.hasNext()) {
+    carpetasPadre.push(padres.next());
+  }
+  
+  // Mover el archivo a la carpeta de destino
+  file.moveTo(carpetaDestino);
+  
+  // Cambiar el nombre para eliminar el sufijo del usuario
+  file.setName(nombreOriginal);
+  
+  // Eliminar de las carpetas temporales originales
+  // (excepto de la carpeta de destino, si es una de ellas)
+  for (let i = 0; i < carpetasPadre.length; i++) {
+    const carpetaPadre = carpetasPadre[i];
+    if (carpetaPadre.getId() !== carpetaDestino.getId()) {
+      try {
+        file.removeFromFolder(carpetaPadre);
+      } catch (e) {
+        Logger.log('No se pudo eliminar el archivo de la carpeta: ' + e.toString());
+      }
+    }
+  }
+}
+
+//Función para quitar el nombre del usuario en el archivo que se subió
+function limpiarNombreArchivo(nombreCompleto) {
+  // Patrón corregido: "Nombre Original - Nombre de Usuario.pdf"
+  const patronUsuario = /^(.+?)\s-\s.*?\.\w+$/;
+  const coincidencia = nombreCompleto.match(patronUsuario);
+  
+  if (coincidencia && coincidencia[1]) {
+    // Obtener la extensión del archivo original
+    const extension = nombreCompleto.split('.').pop();
+    // Combinar el nombre original con la extensión
+    return `${coincidencia[1]}.${extension}`;
+  }
+  
+  return nombreCompleto; // Si no coincide con el patrón, devuelve el nombre completo
+}
+
+//Función para almacenar los datos en el excel
+function registrarObra(datos) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const hoja = ss.getSheetByName('Obras');
+  hoja.appendRow([
+    datos.nombre,
+    datos.autor,
+    datos.arreglista,
+    datos.carpeta,
+    datos.tieneTutoriales,
+    datos.rutaCarpeta,
+    new Date()
+  ]);
+}
+
+//Función para buscar una carpeta por su nombre
+function buscarRutaCarpeta(nombreObra) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const hoja = ss.getSheetByName('Obras');
+  const datos = hoja.getDataRange().getValues();
+  
+  for (let i = 1; i < datos.length; i++) {
+    if (datos[i][0] === nombreObra) {
+      return datos[i][5]; // Columna F con el ID de la carpeta
+    }
+  }
+  return null;
+}
+
+// Función para cambiar el estado del tutorial en la hoja de cálculo
+function actualizarEstadoTutoriales(nombreObra) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const hoja = ss.getSheetByName('Obras');
+  const datos = hoja.getDataRange().getValues();
+  
+  for (let i = 1; i < datos.length; i++) {
+    if (datos[i][0] === nombreObra) {
+      hoja.getRange(i + 1, 5).setValue(true); // Columna E (tieneTutoriales)
+      break;
+    }
+  }
+}
+
+// Función para cambiar las opciones de respuesta en el formulario
+function actualizarOpcionesTutoriales() {
+  // Abrir el formulario y la hoja de cálculo
+  const form = FormApp.openById(FORM_ID);
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const hoja = ss.getSheetByName('Obras');
+  
+  // Obtener todas las obras sin tutoriales
+  const datos = hoja.getDataRange().getValues();
+  const obrasSinTutoriales = datos
+    .slice(1) // Ignorar la fila de encabezados
+    .filter(fila => !fila[4]) // Columna E (tieneTutoriales)
+    .map(fila => fila[0]); // Columna A (nombre de la obra)
+  
+  // Encontrar la pregunta de selección de obra en la sección de tutoriales
+  const items = form.getItems();
+  const preguntaObra = items.find(item => 
+    item.getType() === FormApp.ItemType.LIST && 
+    item.getTitle().includes('¿A qué obra quieres agregarle tutoriales?')); // Ajusta esto según el título exacto de tu pregunta
+  
+  if (preguntaObra) {
+    // Actualizar las opciones de la lista desplegable
+    const preguntaLista = preguntaObra.asListItem();
+    preguntaLista.setChoiceValues(obrasSinTutoriales);
+  }
+}
+
+// Función para crear un activador que actualice el formulario periódicamente
+function crearActivadorActualizacion() {
+  // Eliminar activadores existentes para evitar duplicados
+  const activadores = ScriptApp.getProjectTriggers();
+  activadores.forEach(trigger => ScriptApp.deleteTrigger(trigger));
+  
+  // Crear nuevo activador para que se ejecute cada hora
+  ScriptApp.newTrigger('actualizarOpcionesTutoriales')
+    .timeBased()
+    .everyHours(1)
+    .create();
+}
+
+// Función para escanear todas las carpetas de repertorio y actualizar la hoja de datos
+// Con esto se registrarán los archivos que no hayan sido subidos por el formulario
+function escanearCarpetasYActualizar() {
+  // Abrir la hoja de cálculo
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const hoja = ss.getSheetByName('Obras');
+  
+  // Obtener obras existentes para evitar duplicados
+  const datos = hoja.getDataRange().getValues();
+  const obrasExistentes = datos.slice(1).map(fila => fila[0]);
+  
+  // Escanear cada carpeta principal
+  for (const [nombreCarpeta, idCarpeta] of Object.entries(CARPETAS)) {
+    const carpetaPrincipal = DriveApp.getFolderById(idCarpeta);
+    const subcarpetas = carpetaPrincipal.getFolders();
+    
+    // Recorrer cada subcarpeta (cada obra)
+    while (subcarpetas.hasNext()) {
+      const subcarpeta = subcarpetas.next();
+      const nombreObra = subcarpeta.getName();
+      
+      // Verificar si la obra ya está registrada
+      if (!obrasExistentes.includes(nombreObra)) {
+        Logger.log(`Obra nueva encontrada: ${nombreObra} en ${nombreCarpeta}`);
+        
+        // Escanear la subcarpeta y todas sus subcarpetas internas
+        const resultadoEscaneo = escanearCarpetaRecursivamente(subcarpeta);
+        
+        // Registrar la obra en la hoja de cálculo si tiene partitura
+        if (resultadoEscaneo.tienePartitura) {
+          hoja.appendRow([
+            nombreObra,
+            '', // Autor desconocido
+            '', // Arreglista desconocido
+            nombreCarpeta,
+            resultadoEscaneo.tieneTutoriales,
+            subcarpeta.getId(),
+            new Date()
+          ]);
+          
+          Logger.log(`Obra registrada: ${nombreObra}`);
+        } else {
+          Logger.log(`Subcarpeta sin partitura, ignorada: ${nombreObra}`);
+        }
+      }
+    }
+  }
+  
+  Logger.log('Escaneo completo');
+}
+
+// Función recursiva para escanear una carpeta y todas sus subcarpetas
+function escanearCarpetaRecursivamente(carpeta) {
+  let resultado = {
+    tienePartitura: false,
+    tieneTutoriales: false
+  };
+  
+  // Escanear archivos en la carpeta actual
+  const archivos = carpeta.getFiles();
+  while (archivos.hasNext()) {
+    const archivo = archivos.next();
+    const mimeType = archivo.getMimeType();
+    
+    if (mimeType === 'application/pdf') {
+      resultado.tienePartitura = true;
+    } else if (mimeType.includes('audio')) {
+      resultado.tieneTutoriales = true;
+    }
+    
+    // Si ya encontramos ambos tipos, podemos terminar antes
+    if (resultado.tienePartitura && resultado.tieneTutoriales) {
+      break;
+    }
+  }
+  
+  // Si aún no encontramos ambos tipos, buscar en subcarpetas
+  if (!resultado.tienePartitura || !resultado.tieneTutoriales) {
+    const subcarpetas = carpeta.getFolders();
+    while (subcarpetas.hasNext()) {
+      const subcarpeta = subcarpetas.next();
+      const resultadoSubcarpeta = escanearCarpetaRecursivamente(subcarpeta);
+      
+      // Actualizar resultados
+      resultado.tienePartitura = resultado.tienePartitura || resultadoSubcarpeta.tienePartitura;
+      resultado.tieneTutoriales = resultado.tieneTutoriales || resultadoSubcarpeta.tieneTutoriales;
+      
+      // Si ya encontramos ambos tipos, podemos terminar antes
+      if (resultado.tienePartitura && resultado.tieneTutoriales) {
+        break;
+      }
+    }
+  }
+  
+  return resultado;
+}
+
+// Función para crear un activador que ejecute el escaneo diariamente
+function crearActivadorEscaneo() {
+  ScriptApp.newTrigger('escanearCarpetasYActualizar')
+    .timeBased()
+    .everyDays(1)
+    .atHour(1) // La ejecuta a la 1 AM para no interferir con el uso normal
+    .create();
+}
+
+// Función para ejecutar el escaneo manualmente
+function ejecutarEscaneoManual() {
+  escanearCarpetasYActualizar();
+}
